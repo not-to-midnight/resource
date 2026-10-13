@@ -1,0 +1,61 @@
+# ============================================================================
+# Pi0 + MuJoCo 桌面抓取实验配置
+# ============================================================================
+
+# --- 模型 ---
+model:
+  # openpi 配置名（预训练 pi0_base）
+  config_name: "pi0_base"
+  # checkpoint 路径或 gs:// 地址（留空则自动从配置默认路径下载）
+  checkpoint: "gs://openpi-assets/checkpoints/pi0_base"
+  # 推理设备
+  device: "cuda:0"
+  # 动作维度 (pi0_base 单臂: xyz + rpy + gripper = 7)
+  action_dim: 7
+
+# --- 场景 ---
+scene:
+  xml_path: "mujoco_scene.xml"
+  # 使用的观测相机
+  camera: "global_cam"
+  # 渲染分辨率
+  render_width: 224
+  render_height: 224
+
+# --- 任务指令 ---
+task:
+  # 默认抓取指令（可替换为下方测试指令列表中的任意一条）
+  prompt: "pick up the blue cup"
+  # 目标物体名（用于抓取成功判定，与 xml 中 body 名一致）
+  target_body: "cup"
+  # 夹爪判定为闭合的阈值（两指间距小于该值视为已闭合）
+  gripper_closed_thresh: 0.015
+  # 抬升成功高度（物体相对桌面上升的高度）
+  lift_threshold: 0.06
+
+# --- 控制 ---
+control:
+  # 控制频率 Hz（每多少个仿真步推理一次 pi0）
+  control_freq: 10
+  # 单步仿真时长（秒）
+  dt: 0.002
+  # 每次推理后执行的动作 chunk 步数
+  action_chunk_steps: 1
+  # 动作裁剪：单步关节角度最大变化量(弧度)
+  max_joint_delta: 0.05
+  # 动作裁剪：末端执行器单步最大位移(米)
+  max_ee_delta: 0.01
+  # 夹爪开合范围(米)
+  gripper_open: 0.035
+  gripper_close: 0.0
+  # 关节位置控制增益
+  kp: 50.0
+
+# --- 运行 ---
+runtime:
+  # 最大运行步数
+  max_steps: 500
+  # 是否显示可视化窗口
+  show_viewer: true
+  # 日志详细程度
+  verbose: true
