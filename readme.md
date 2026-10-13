@@ -241,3 +241,6 @@ move the block away from the cup
 | 机械臂抖动 | 减小 `max_joint_delta` 和 `max_ee_delta`，增大 `control_freq` |
 | 抓取判定不触发 | 降低 `lift_threshold` 或 `gripper_closed_thresh` |
 | 动作维度不匹配 | 确认 `action_dim` 与所用模型一致 (pi0_base=7) |
+
+
+lab test
