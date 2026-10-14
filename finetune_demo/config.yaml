@@ -1,0 +1,53 @@
+# ============================================================================
+# LoRA 微调配置（Qwen2.5-1.5B-Instruct）
+# ============================================================================
+
+# --- 底座模型 ---
+model:
+  name: "Qwen/Qwen2.5-1.5B-Instruct"
+  # 权重精度：bfloat16 省显存且训练稳定（老卡不支持则改 float16）
+  dtype: "bfloat16"
+  # "auto" 会自动分配到可用 GPU/CPU
+  device_map: "auto"
+
+# --- LoRA 参数 ---
+lora:
+  # 低秩矩阵的秩。越大表达能力越强、显存越多（8~64 常用）
+  r: 16
+  # 缩放系数，一般取 r 的 1~2 倍
+  alpha: 32
+  dropout: 0.05
+  # 注入到哪些线性层（Qwen2 的注意力 + MLP 投影层）
+  target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - gate_proj
+    - up_proj
+    - down_proj
+
+# --- 数据 ---
+data:
+  train_file: "data/sample_data.jsonl"
+  # 单条样本最大 token 数，超出截断
+  max_length: 512
+  # 训练时统一的 system 人设
+  system_prompt: "你是一个具身智能实验室的助手，回答简洁、专业、中文优先。"
+
+# --- 训练超参 ---
+train:
+  epochs: 3
+  batch_size: 2
+  # 梯度累积：等效 batch = batch_size * grad_accum
+  grad_accum: 4
+  lr: 0.0002
+  lr_scheduler: "cosine"
+  warmup_ratio: 0.03
+  logging_steps: 5
+  bf16: true
+  gradient_checkpointing: true
+
+# --- 输出 ---
+output:
+  dir: "outputs"

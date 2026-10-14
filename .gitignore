@@ -17,3 +17,6 @@ __pycache__/
 *.egg-info/
 .venv/
 .env
+
+### Fine-tune 产物（权重文件很大，不入库）
+finetune_demo/outputs/
