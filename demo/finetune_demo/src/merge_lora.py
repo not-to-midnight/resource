@@ -5,6 +5,10 @@
         --base Qwen/Qwen2.5-1.5B-Instruct \
         --adapter outputs/adapter \
         --out outputs/merged
+
+为什么要合并？
+    adapter 模式部署时，运行环境还得装 peft 才能加载；
+    合并之后就是一个普通模型，体积和底座一样大，但部署更简单。
 """
 
 import argparse
@@ -27,7 +31,8 @@ def main():
     )
     model = PeftModel.from_pretrained(base, args.adapter)
 
-    # 把 LoRA 的增量权重加回底座，并移除 adapter 结构
+    # 核心一步：把 BA 的增量真正加到 W 上（W' = W + BA），
+    # 并拆掉 adapter 的外壳，得到一个普通模型。
     model = model.merge_and_unload()
     model.save_pretrained(args.out)
     tokenizer.save_pretrained(args.out)
