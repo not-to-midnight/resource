@@ -27,7 +27,11 @@
 ├── mujoco_scene.xml      # 机器人、桌面、杯子、方块仿真场景 (MuJoCo XML)
 ├── run_pi0_grasp.py      # 主运行脚本 (中文注释)
 ├── config.yaml           # 实验配置：模型名称、控制频率、动作参数、任务prompt
-└── readme.md             # 本文档
+├── readme.md             # 本文档
+├── assets/               # 预览图、运行视频等素材
+├── 实验日志/             # 实验过程记录
+├── finetune_demo/        # LoRA 微调示例工程
+└── 学习资料/             # 参考资料
 ```
 
 ---
@@ -68,13 +72,28 @@ uv pip install mujoco mujoco-python-viewer pyyaml numpy
 
 > `mujoco-python-viewer` 用于实时窗口可视化；若在无显示环境运行，用 `--no-viewer`。
 
-### 3.3 下载 π0_base 权重
+### 3.3 安装 gsutil（用于可靠下载权重）
 
-权重会在首次运行时自动下载到 `~/.cache/openpi`，也可手动下载：
+> ⚠️ openpi 通过 `gsutil` 下载 `openpi-assets` 权重。**若缺少 gsutil，会回退到 gcsfs，极易下载出损坏的 checkpoint**（表现为加载时报 `OUT_OF_RANGE` 或缓存目录出现嵌套的 `pi0_droid/pi0_droid`）。
 
 ```bash
-# gs://openpi-assets/checkpoints/pi0_base
-# 或使用 openpi 提供的 download.maybe_download 自动拉取
+# 在 openpi 虚拟环境中安装 gsutil
+uv pip install gsutil
+
+# 运行时确保 .venv/bin 在 PATH 中，openpi 才能调用到 gsutil：
+export PATH=/path/to/openpi/.venv/bin:$PATH
+```
+
+### 3.4 下载 π0 权重
+
+> 📌 **关于模型选择**：openpi 未提供 `pi0_base` 的推理配置（base 权重仅用于微调，无法直接推理）。因此本工程默认使用 **`pi0_droid`**——在 DROID 桌面操作数据上微调、支持 0-shot 推理的模型，其动作空间正是桌面抓取所需的 8 维。
+
+权重在首次运行时自动下载到 `~/.cache/openpi`（约 11 GiB），也可手动下载：
+
+```bash
+# gs://openpi-assets/checkpoints/pi0_droid
+PATH=/path/to/openpi/.venv/bin:$PATH python -c \
+  "from openpi.shared import download; print(download.maybe_download('gs://openpi-assets/checkpoints/pi0_droid'))"
 ```
 
 设置缓存目录（可选）：
@@ -83,7 +102,7 @@ uv pip install mujoco mujoco-python-viewer pyyaml numpy
 export OPENPI_DATA_HOME=/path/to/your/cache
 ```
 
-### 3.4 克隆 / 进入本工程
+### 3.5 克隆 / 进入本工程
 
 将本工程四个文件放在同一目录（建议放在 openpi 仓库内，便于直接复用其虚拟环境）：
 
@@ -127,14 +146,17 @@ uv run python run_pi0_grasp.py --no-viewer
 
 | 字段 | 说明 | 默认值 |
 |------|------|--------|
-| `model.config_name` | openpi 模型配置名 | `pi0_base` |
-| `model.checkpoint` | checkpoint 路径 / gs 地址 | `gs://openpi-assets/checkpoints/pi0_base` |
-| `model.action_dim` | 动作维度 | `7` |
-| `scene.camera` | 观测相机名 | `global_cam` |
+| `model.config_name` | openpi 模型配置名 | `pi0_droid` |
+| `model.checkpoint` | checkpoint 路径 / gs 地址 | `gs://openpi-assets/checkpoints/pi0_droid` |
+| `model.action_dim` | 动作维度（pi0_droid 为 8） | `8` |
+| `scene.camera` | 全局观测相机名 | `global_cam` |
+| `scene.wrist_camera` | 腕部观测相机名 | `wrist_cam` |
+| `scene.table_height` | 桌面高度（抓取判定用） | `0.4` |
 | `task.prompt` | 抓取语言指令 | `pick up the blue cup` |
 | `task.target_body` | 目标物体 body 名 | `cup` |
 | `task.lift_threshold` | 判定抬升成功高度 (m) | `0.06` |
 | `control.control_freq` | π0 推理频率 (Hz) | `10` |
+| `control.action_chunk_steps` | 每次推理下发的 chunk 步数 | `5` |
 | `control.max_joint_delta` | 单步关节角度最大增量 (rad) | `0.05` |
 | `control.max_ee_delta` | 单步末端最大位移 (m) | `0.01` |
 | `control.kp` | 关节位置控制增益 | `50.0` |
@@ -240,7 +262,36 @@ move the block away from the cup
 | 窗口无法显示 | 确认有显示器 / X11 转发；或加 `--no-viewer` |
 | 机械臂抖动 | 减小 `max_joint_delta` 和 `max_ee_delta`，增大 `control_freq` |
 | 抓取判定不触发 | 降低 `lift_threshold` 或 `gripper_closed_thresh` |
-| 动作维度不匹配 | 确认 `action_dim` 与所用模型一致 (pi0_base=7) |
+| 动作维度不匹配 | 确认 `action_dim` 与所用模型一致（pi0_droid=8） |
+| 加载 checkpoint 报 `OUT_OF_RANGE` | checkpoint 下载损坏：删除 `~/.cache/openpi/openpi-assets/checkpoints/pi0_droid*`，装好 gsutil 后重下 |
+
+
+## 11. π0_droid 观测 / 动作接口说明
+
+`pi0_droid`（DROID 微调模型）的输入输出如下，主程序 `run_pi0_grasp.py` 已按此适配：
+
+**输入 observation（dict）**
+
+| 键 | 形状 / 类型 | 说明 |
+|----|------------|------|
+| `observation/exterior_image_1_left` | (224,224,3) uint8 | 全局相机 RGB |
+| `observation/wrist_image_left` | (224,224,3) uint8 | 腕部相机 RGB |
+| `observation/joint_position` | (6,) float32 | 机械臂 6 关节角 |
+| `observation/gripper_position` | (1,) float32 | 夹爪位置 |
+| `prompt` | str | 语言指令 |
+
+> 状态与动作会被 openpi 的 `PadStatesAndActions` 自动填充到 32 维，因此 6 自由度机械臂可直接使用。
+
+**输出**
+
+```python
+result = policy.infer(example)      # -> {"actions": np.ndarray}
+actions = result["actions"]          # shape: (chunk_len, 8)
+```
+
+动作 8 维语义：`[:3]`=末端位置增量，`[3:6]`=末端旋转增量，`[6]`=夹爪，`[7]`=保留未用。
+
+> ⚠️ **重要说明**：`pi0_droid` 是在真实 Franka/DROID 平台数据上训练的，与本案的自定义 6 自由度机械臂、MuJoCo 场景存在域差异。因此**零样本抓取成功率有限**；本工程的价值在于提供完整可跑通的 VLA 仿真闭环骨架（渲染 → 推理 → action chunk → IK → 裁剪 → 抓取判定）。若需稳定抓取，建议用本场景数据微调模型。
 
 
 lab test

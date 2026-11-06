@@ -19,10 +19,7 @@ Pi0 (OpenPI VLA) + MuJoCo 桌面抓取仿真主程序
 """
 
 import argparse
-import os
-import sys
 import time
-from pathlib import Path
 
 import numpy as np
 
@@ -43,14 +40,17 @@ def load_config(config_path: str) -> dict:
 # ----------------------------------------------------------------------------
 def load_pi0_policy(cfg: dict):
     """
-    按照 openpi 官方方式加载预训练 pi0_base 策略。
+    按照 openpi 官方方式加载预训练策略。
+
+    说明：openpi 未提供 pi0_base 的推理配置（base 权重仅用于微调），
+    因此这里默认使用 pi0_droid（DROID 桌面操作微调模型，支持 0-shot 推理）。
 
     官方 API:
         from openpi.training import config as _config
         from openpi.policies import policy_config
         from openpi.shared import download
-        config = _config.get_config("pi0_base")
-        checkpoint_dir = download.maybe_download("gs://openpi-assets/checkpoints/pi0_base")
+        config = _config.get_config("pi0_droid")
+        checkpoint_dir = download.maybe_download("gs://openpi-assets/checkpoints/pi0_droid")
         policy = policy_config.create_trained_policy(config, checkpoint_dir)
     """
     print("[Pi0] 正在加载 π0 策略 ...")
@@ -76,24 +76,10 @@ def load_pi0_policy(cfg: dict):
 
 
 # ----------------------------------------------------------------------------
-# 图像处理：将 MuJoCo 渲染的图像转为 π0 输入格式 [3, 224, 224] float32
-# ----------------------------------------------------------------------------
-def preprocess_image(rgb: np.ndarray) -> np.ndarray:
-    """
-    MuJoCo 渲染输出: (H, W, 3) uint8, RGB
-    π0 输入要求:    (3, 224, 224) float32, 归一化到 [0, 1]
-    """
-    img = rgb.astype(np.float32) / 255.0
-    # HWC -> CHW
-    img = np.transpose(img, (2, 0, 1))
-    return img
-
-
-# ----------------------------------------------------------------------------
 # 末端执行器 Jacobian 逆运动学（将 EE 速度转为关节速度）
 # ----------------------------------------------------------------------------
 def solve_joint_velocity_from_ee(
-    data, model, ee_site_id, ee_body_id,
+    data, model, ee_body_id,
     ee_vel: np.ndarray, damping: float = 1e-3
 ) -> np.ndarray:
     """
@@ -138,7 +124,7 @@ def clip_joint_delta(
 # ----------------------------------------------------------------------------
 # 抓取成功判定
 # ----------------------------------------------------------------------------
-def check_grasp_success(data, model, cfg) -> dict:
+def check_grasp_success(data, cfg) -> dict:
     """
     简单抓取成功判定：
         1. 夹爪闭合（两指间距 < 阈值）
@@ -160,8 +146,8 @@ def check_grasp_success(data, model, cfg) -> dict:
         target_z = data.xpos[target_body_id][2]
     except Exception:
         target_z = 0.0
-    # 桌面高度 0.4
-    table_z = 0.4
+    # 桌面高度（与 mujoco_scene.xml 中 table 的 z 一致）
+    table_z = cfg["scene"]["table_height"]
     lifted = (target_z - table_z) > cfg["task"]["lift_threshold"]
 
     success = gripper_closed and lifted
@@ -183,6 +169,8 @@ def main():
     parser.add_argument("--config", type=str, default="config.yaml", help="配置文件路径")
     parser.add_argument("--prompt", type=str, default=None, help="覆盖配置中的任务指令")
     parser.add_argument("--no-viewer", action="store_true", help="不显示可视化窗口")
+    parser.add_argument("--record", type=str, default=None,
+                        help="录制视频到指定文件（如 output.mp4），无显示器环境下用此方式查看仿真")
     args = parser.parse_args()
 
     # ---- 加载配置 ----
@@ -201,8 +189,12 @@ def main():
     print("=" * 70)
 
     # ---- 加载 MuJoCo 模型 ----
+    # 无显示环境（远程服务器 / SSH）自动切换到 EGL 离屏渲染，避免渲染报错
+    import os
+    if "DISPLAY" not in os.environ:
+        os.environ.setdefault("MUJOCO_GL", "egl")
+
     import mujoco
-    import mujoco_viewer
 
     model = mujoco.MjModel.from_xml_path(scene_xml)
     data = mujoco.MjData(model)
@@ -214,6 +206,7 @@ def main():
     # ---- 初始化可视化窗口 ----
     viewer = None
     if cfg["runtime"]["show_viewer"]:
+        import mujoco_viewer
         viewer = mujoco_viewer.MujocoViewer(model, data, width=960, height=720)
 
     # ---- 加载 π0 策略 ----
@@ -230,12 +223,26 @@ def main():
     kp = cfg["control"]["kp"]
     max_steps = cfg["runtime"]["max_steps"]
 
-    # 渲染参数
+    # 渲染参数（pi0_droid 需要全局相机 + 腕部相机两路图像）
     cam_name = cfg["scene"]["camera"]
     cam_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_CAMERA, cam_name)
+    wrist_cam_name = cfg["scene"]["wrist_camera"]
+    wrist_cam_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_CAMERA, wrist_cam_name)
     render_w = cfg["scene"]["render_width"]
     render_h = cfg["scene"]["render_height"]
     renderer = mujoco.Renderer(model, height=render_h, width=render_w)
+
+    # ---- 视频录制（无显示器环境下用此方式查看仿真）----
+    video_writer = None
+    video_renderer = None
+    if args.record:
+        import imageio
+        # 视频用更高分辨率（640x480），仅用于观看，不影响 π0 输入
+        vid_w, vid_h = 640, 480
+        video_renderer = mujoco.Renderer(model, height=vid_h, width=vid_w)
+        # 使用 imageio + ffmpeg 写 H.264 mp4，兼容性最好（浏览器/IDE/播放器都能播）
+        video_writer = imageio.get_writer(args.record, fps=30, codec="libx264")
+        print(f"[录制] 视频将保存到 {args.record} (分辨率 {vid_w}x{vid_h}, 30fps, H.264)")
 
     # ---- 主循环 ----
     print(f"\n[启动] 控制频率 {control_freq}Hz, 每控制周期 {steps_per_control} 个仿真步")
@@ -244,73 +251,82 @@ def main():
     step = 0
     grasp_result = None
     last_action = np.zeros(cfg["model"]["action_dim"], dtype=np.float32)
+    action_buffer = []  # 待下发的动作队列（来自 π0 输出的 action chunk 连续序列）
 
     while step < max_steps:
-        # --------------- 推理阶段（每个控制周期一次）---------------
+        # --------------- 控制阶段（每个控制周期执行一次）---------------
         if step % steps_per_control == 0:
-            # 1) 渲染相机 RGB 图像
-            renderer.update_scene(data, camera=cam_id)
-            rgb = renderer.render()  # (H, W, 3) uint8
-            img_chw = preprocess_image(rgb)
+            # 读取当前关节状态（IK 需要）
+            joint_qpos = np.array([data.joint(f"joint{i}").qpos[0] for i in range(1, 7)], dtype=np.float32)
 
-            # 2) 读取关节状态 (前6个关节 + 夹爪平均 = 7维状态)
-            joint_qpos = np.array([data.joint(f"joint{i}").qpos[0] for i in range(1, 7)])
-            grip_l = data.joint("finger_left").qpos[0]
-            grip_r = data.joint("finger_right").qpos[0]
-            gripper_state = (grip_l + grip_r) / 2.0
-            robot_state = np.concatenate([joint_qpos, [gripper_state]])
+            # 动作队列为空时，调用 π0 推理生成新的 action chunk
+            if not action_buffer:
+                # 1) 渲染两路相机 RGB 图像（全局相机 + 腕部相机），HWC uint8
+                renderer.update_scene(data, camera=cam_id)
+                base_rgb = renderer.render()            # (H, W, 3) uint8
+                renderer.update_scene(data, camera=wrist_cam_id)
+                wrist_rgb = renderer.render()           # (H, W, 3) uint8
 
-            # 3) 构造 π0 输入 observation dict
-            #    π0 要求: image=[3,H,W], state=关节状态, prompt=语言指令
-            example = {
-                "observation/exterior_image_1_left": img_chw,
-                "observation/state": robot_state.astype(np.float32),
-                "prompt": prompt,
-            }
+                # 2) 读取夹爪状态
+                grip_l = data.joint("finger_left").qpos[0]
+                grip_r = data.joint("finger_right").qpos[0]
+                gripper_pos = np.array([(grip_l + grip_r) / 2.0], dtype=np.float32)
 
-            # 4) 调用 π0 推理，得到 action chunk
-            t0 = time.time()
-            try:
-                output = policy.infer(example)
-                action_chunk = np.array(output["actions"], dtype=np.float32)
-            except Exception as e:
-                print(f"[警告] π0 推理失败: {e}，使用上一次动作")
-                action_chunk = last_action[None, :]
-            infer_time = (time.time() - t0) * 1000
+                # 3) 构造 pi0_droid 输入 observation dict
+                #    pi0_droid 需要: 全局相机 + 腕部相机(HWC uint8) + 关节位置 + 夹爪位置 + prompt
+                example = {
+                    "observation/exterior_image_1_left": base_rgb,
+                    "observation/wrist_image_left": wrist_rgb,
+                    "observation/joint_position": joint_qpos,
+                    "observation/gripper_position": gripper_pos,
+                    "prompt": prompt,
+                }
 
-            # 取 chunk 的第一步作为当前动作 (shape: [7,])
-            action = action_chunk[0] if action_chunk.ndim > 1 else action_chunk
+                # 4) 调用 π0 推理，得到 action chunk（连续动作序列）
+                t0 = time.time()
+                try:
+                    output = policy.infer(example)
+                    action_chunk = np.asarray(output["actions"], dtype=np.float32)
+                except Exception as e:
+                    print(f"[警告] π0 推理失败: {e}，沿用上一次动作")
+                    action_chunk = last_action[None, :]
+                infer_time = (time.time() - t0) * 1000
+
+                if action_chunk.ndim == 1:
+                    action_chunk = action_chunk[None, :]
+                # 用 chunk 的前 action_chunk_steps 步填充动作队列
+                action_buffer = [a for a in action_chunk[:action_chunk_steps]]
+                print(f"[step {step:4d}] 推理耗时 {infer_time:6.1f}ms | "
+                      f"chunk 共 {len(action_chunk)} 步，本次下发 {len(action_buffer)} 步")
+
+            # 5) 从动作队列取出当前动作 (pi0_droid 输出 8 维)
+            action = action_buffer.pop(0)
             last_action = action.copy()
 
-            # 解析动作: [x, y, z, roll, pitch, yaw, gripper]
-            # pi0_base 单臂动作: 末端 xyz + rpy + 夹爪
+            # 解析动作: [x, y, z, roll, pitch, yaw, gripper, 第8维(未使用)]
+            # pi0_droid 单臂动作: 末端 xyz + 旋转 + 夹爪
             ee_pos_delta = action[:3].copy()      # 末端位置增量
             ee_rot_delta = action[3:6].copy()     # 末端旋转增量
-            gripper_action = action[6].copy()     # 夹爪 (0=开, 1=合 或 连续值)
+            gripper_action = action[6].copy()     # 夹爪 (越大越闭合)
 
             # 裁剪末端位移，防止大跳变
             ee_pos_delta = np.clip(ee_pos_delta, -cfg["control"]["max_ee_delta"],
                                    cfg["control"]["max_ee_delta"])
 
-            print(f"[step {step:4d}] 推理耗时 {infer_time:6.1f}ms | "
-                  f"动作 xyz={ee_pos_delta.round(4)} | "
-                  f"rpy={ee_rot_delta.round(4)} | "
-                  f"gripper={gripper_action:.3f}")
+            print(f"           动作 xyz={ee_pos_delta.round(4)} | "
+                  f"rot={ee_rot_delta.round(4)} | gripper={gripper_action:.3f}")
 
-            # 末端执行器速度 = 位移增量 / 控制周期
+            # 6) 末端速度 -> Jacobian 伪逆 -> 目标关节位置
             control_period = steps_per_control * dt
             ee_vel = np.concatenate([ee_pos_delta / control_period,
                                      ee_rot_delta / control_period])
-
-            # 5) 用 Jacobian 伪逆解出关节速度，再积分得到目标关节位置
-            dq_vel = solve_joint_velocity_from_ee(data, model, None, ee_body_id, ee_vel)
+            dq_vel = solve_joint_velocity_from_ee(data, model, ee_body_id, ee_vel)
             target_qpos = joint_qpos + dq_vel[:6] * control_period
 
-            # 6) 关节动作裁剪（限制单步增量，防抖动）
+            # 7) 关节动作裁剪（限制单步增量，防抖动）
             target_qpos = clip_joint_delta(target_qpos, joint_qpos, max_joint_delta)
 
-            # 7) 夹爪控制: 将 gripper_action 映射到开合范围
-            #    假设 gripper_action 越大越闭合
+            # 8) 夹爪控制: 将 gripper_action 映射到开合范围
             grip_norm = float(np.clip(gripper_action, 0.0, 1.0))
             grip_target = gripper_open * (1.0 - grip_norm) + gripper_close * grip_norm
 
@@ -320,9 +336,11 @@ def main():
             cur = data.joint(f"joint{i+1}").qpos[0]
             data.ctrl[i] = kp * (target_qpos[i] - cur)
 
-        # 夹爪控制
-        data.ctrl[6] = kp * (grip_target - grip_l)
-        data.ctrl[7] = kp * (grip_target - grip_r)
+        # 夹爪控制（读取当前夹爪位置）
+        cur_grip_l = data.joint("finger_left").qpos[0]
+        cur_grip_r = data.joint("finger_right").qpos[0]
+        data.ctrl[6] = kp * (grip_target - cur_grip_l)
+        data.ctrl[7] = kp * (grip_target - cur_grip_r)
 
         # 步进仿真
         mujoco.mj_step(model, data)
@@ -332,9 +350,15 @@ def main():
         if viewer is not None and viewer.is_alive():
             viewer.render()
 
+        # 录制视频帧（每步一帧，30fps 输出）
+        if video_writer is not None:
+            video_renderer.update_scene(data, camera=cam_id)
+            frame = video_renderer.render()            # RGB (H,W,3) uint8
+            video_writer.append_data(frame)
+
         # --------------- 抓取成功判定（每个控制周期检查一次）---------------
         if step % steps_per_control == 0:
-            grasp_result = check_grasp_success(data, model, cfg)
+            grasp_result = check_grasp_success(data, cfg)
             status_str = "✔ 成功" if grasp_result["success"] else "进行中"
             print(f"            [判定] 夹爪闭合={grasp_result['gripper_closed']} | "
                   f"抬升={grasp_result['lifted']} (高度={grasp_result['lift_height']:.4f}m) | "
@@ -353,6 +377,12 @@ def main():
 
     if viewer is not None:
         viewer.close()
+
+    # 释放视频写入器
+    if video_writer is not None:
+        video_writer.close()
+        print(f"[录制] 视频已保存: {args.record}")
+
     print("[结束] 仿真结束。")
 
 
