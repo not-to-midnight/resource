@@ -262,6 +262,7 @@ move the block away from the cup
 | 窗口无法显示 | 确认有显示器 / X11 转发；或加 `--no-viewer` |
 | 机械臂抖动 | 减小 `max_joint_delta` 和 `max_ee_delta`，增大 `control_freq` |
 | 抓取判定不触发 | 降低 `lift_threshold` 或 `gripper_closed_thresh` |
+<<<<<<<< HEAD:demolab/readme.md
 | 动作维度不匹配 | 确认 `action_dim` 与所用模型一致（pi0_droid=8） |
 | 加载 checkpoint 报 `OUT_OF_RANGE` | checkpoint 下载损坏：删除 `~/.cache/openpi/openpi-assets/checkpoints/pi0_droid*`，装好 gsutil 后重下 |
 
@@ -295,3 +296,9 @@ actions = result["actions"]          # shape: (chunk_len, 8)
 
 
 lab test
+========
+| 动作维度不匹配 | 确认 `action_dim` 与所用模型一致 (pi0_base=7) |
+
+
+test
+>>>>>>>> 32e60e03babd62f8eba1c695dbb39e1951706a72:pidemo/readme.md

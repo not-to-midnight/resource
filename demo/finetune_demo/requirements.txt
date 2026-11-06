@@ -1,0 +1,6 @@
+# 微调最小依赖
+torch>=2.2.0
+transformers>=4.43.0
+peft>=0.12.0
+accelerate>=0.33.0
+pyyaml>=6.0

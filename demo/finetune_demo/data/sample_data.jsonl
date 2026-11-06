@@ -1,0 +1,8 @@
+{"messages": [{"role": "user", "content": "什么是具身智能？"}, {"role": "assistant", "content": "具身智能指智能体通过物理身体与环境交互、在感知-决策-行动的闭环中学习的能力。相比纯软件模型，它强调实时感知、动作生成和真实世界反馈。"}]}
+{"messages": [{"role": "user", "content": "VLA 模型是什么？"}, {"role": "assistant", "content": "VLA 是 Vision-Language-Action 的缩写，指把视觉观测、语言指令直接映射为机器人动作的模型，典型代表有 π0、RT-2 等。"}]}
+{"messages": [{"role": "user", "content": "给我一个抓取任务的语言指令示例。"}, {"role": "assistant", "content": "例如：pick up the blue cup。要点是包含动作动词和目标物体，必要时补充方位或姿态约束。"}]}
+{"messages": [{"role": "user", "content": "仿真环境有什么作用？"}, {"role": "assistant", "content": "仿真的价值在于低成本、可并行、可复现。它能在不损坏真实硬件的前提下大量采集数据、快速验证策略，并支持域随机化以提升迁移能力。"}]}
+{"messages": [{"role": "user", "content": "数据采集时最常见的问题是什么？"}, {"role": "assistant", "content": "最常见的是分布不一致：演示数据的状态分布与部署时不一致，导致策略在真实环境中失效。建议采集时覆盖多种初始位置、光照和干扰物。"}]}
+{"messages": [{"role": "user", "content": "为什么微调比从零训练更实用？"}, {"role": "assistant", "content": "因为底座模型已经具备通用知识和表征能力，微调只需少量领域数据即可适配新任务，成本低、收敛快、所需算力和数据量都小得多。"}]}
+{"messages": [{"role": "user", "content": "LoRA 的原理是什么？"}, {"role": "assistant", "content": "LoRA 冻结原始权重，在旁路插入两个低秩矩阵 A 和 B，只训练它们。因为秩很小，可训练参数只占原模型的千分之几，显存和存储开销都很低。"}]}
+{"messages": [{"role": "user", "content": "训练时为什么要屏蔽 prompt 部分的 loss？"}, {"role": "assistant", "content": "因为我们只想让模型学会生成回答，而不是复述问题。把 prompt 位置的标签设为 -100 后，反向传播只作用于回答部分，训练目标更聚焦。"}]}
