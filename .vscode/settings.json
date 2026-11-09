@@ -1,0 +1,4 @@
+{
+    "python.defaultInterpreterPath": "/home/lab416/anaconda3/envs/act_env/bin/python",
+    "python.terminal.activateEnvironment": true
+}
