@@ -4,7 +4,19 @@
     // 欲了解更多信息，请访问: https://go.microsoft.com/fwlink/?linkid=830387
     "version": "0.2.0",
     "configurations": [
-    
+        {
+            // F5 默认启动整个仿真系统（LogicSys 批量注册 arm / cube 等 manager）
+            "name": "StartBoot: 仿真系统",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/act_project/remote_control/script/function/startboot.py",
+            "python": "/home/lab416/anaconda3/envs/act_env/bin/python",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "env": {
+                "MUJOCO_GL": "egl"
+            }
+        },
         {
             "name": "Python Debugger: Current File",
             "type": "debugpy",
@@ -12,7 +24,10 @@
             "program": "${file}",
             "python": "/home/lab416/anaconda3/envs/act_env/bin/python",
             "cwd": "${workspaceFolder}",
-            "console": "integratedTerminal"
+            "console": "integratedTerminal",
+            "env": {
+                "MUJOCO_GL": "egl"
+            }
         }
     ]
 }
