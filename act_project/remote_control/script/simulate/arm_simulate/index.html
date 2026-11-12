@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>myCobot MuJoCo 仿真</title>
+  <style>
+    body { background: #111; color: #eee; font-family: sans-serif; margin: 0; padding: 16px; }
+    .wrap { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
+    img { border: 1px solid #444; max-width: 100%; }
+    .panel { background: #1b1b1b; border: 1px solid #333; border-radius: 8px; padding: 16px; min-width: 240px; }
+    .panel h3 { margin: 0 0 12px; font-size: 15px; color: #9cdcfe; }
+    .row { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid #2a2a2a; font-size: 14px; }
+    .row span:last-child { font-family: monospace; color: #b5cea8; }
+    .muted { color: #888; font-size: 12px; margin-top: 8px; line-height: 1.6; }
+    .slider { display: flex; align-items: center; gap: 8px; margin: 6px 0; font-size: 13px; }
+    .slider label { width: 26px; color: #9cdcfe; }
+    .slider input[type=range] { flex: 1; accent-color: #4ea1ff; }
+    .slider output { width: 52px; text-align: right; font-family: monospace; color: #b5cea8; }
+    .slider .step { width: 24px; height: 24px; padding: 0; margin: 0; font-size: 15px; line-height: 1; border-radius: 4px; }
+    .ikrow { display: flex; align-items: center; gap: 6px; margin: 6px 0; font-size: 13px; }
+    .ikrow label { min-width: 32px; color: #9cdcfe; }
+    .ikrow input[type=number] { width: 80px; background: #262626; color: #eee; border: 1px solid #444; border-radius: 4px; padding: 4px 6px; }
+    button { background: #2d2d2d; color: #eee; border: 1px solid #444; border-radius: 5px; padding: 6px 12px; cursor: pointer; font-size: 13px; margin-top: 8px; }
+    button:hover { background: #3a3a3a; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div><h3 style="margin-top:0">固定视角</h3><img src="/stream"></div>
+    <div><h3 style="margin-top:0">第一人称（腕部相机）</h3><img src="/stream_cam"></div>
+    <div><h3 style="margin-top:0">第三人称（跟随夹爪）</h3><img src="/stream_chase"></div>
+    <div class="panel">
+      <h3>关节控制</h3>
+      <div id="sliders"></div>
+      <button onclick="resetJoints()">全部回零</button>
+      <h3 style="margin-top:18px">目标位姿（IK）</h3>
+      <div class="ikrow"><label>X</label><input id="px" type="number" step="0.01">米</div>
+      <div class="ikrow"><label>Y</label><input id="py" type="number" step="0.01">米</div>
+      <div class="ikrow"><label>Z</label><input id="pz" type="number" step="0.01">米</div>
+      <div class="ikrow"><label>夹爪</label><input id="pg" type="number" step="1">毫米</div>
+      <div class="ikrow"><label><input id="pdown" type="checkbox">姿态朝下</label></div>
+      <button onclick="startIK()">开始 IK</button>
+      <button onclick="goHome()">回到零位</button>
+      <div id="ikstat" class="muted"></div>
+    </div>
+  </div>
+  <script>
+    const box = document.getElementById('sliders');
+    for (let i = 0; i < 6; i++) {
+      const row = document.createElement('div');
+      row.className = 'slider';
+      row.innerHTML = `<label>J${i+1}</label>
+        <button class="step" onclick="nudge(${i},-1)">−</button>
+        <input type="range" min="-160" max="160" step="1" id="j${i}">
+        <button class="step" onclick="nudge(${i},1)">+</button>
+        <output id="o${i}"></output>`;
+      box.appendChild(row);
+      row.querySelector('input').addEventListener('input', sendJoints);
+    }
+    {
+      const row = document.createElement('div');
+      row.className = 'slider';
+      row.innerHTML = `<label>G</label>
+        <button class="step" onclick="nudge(6,-1)">−</button>
+        <input type="range" min="0" max="15" step="1" id="j6">
+        <button class="step" onclick="nudge(6,1)">+</button>
+        <output id="o6"></output>`;
+      box.appendChild(row);
+      row.querySelector('input').addEventListener('input', sendJoints);
+    }
+
+    function currentJoints() {
+      const vals = [];
+      for (let i = 0; i < 6; i++) {
+        const v = document.getElementById('j'+i).value;
+        document.getElementById('o'+i).textContent = v + '°';
+        vals.push(v);
+      }
+      const g = document.getElementById('j6').value;
+      document.getElementById('o6').textContent = g + 'mm';
+      vals.push(g);
+      return vals;
+    }
+
+    function sendJoints() {
+      fetch('/set?angles=' + currentJoints().join(',')).catch(() => {});
+    }
+
+    function nudge(id, d) {
+      const el = document.getElementById('j' + id);
+      el.value = Math.min(Number(el.max), Math.max(Number(el.min), Number(el.value) + d));
+      sendJoints();
+    }
+
+    function resetJoints() {
+      fetch('/reset')
+        .then(response => response.json())
+        .then(data => {
+          if (data.ok) updateJointControls(data.state);
+        })
+        .catch(() => {});
+    }
+
+    function updateJointControls(state) {
+      for (let i = 0; i < 6; i++) {
+        const angle = state.angles_deg[i];
+        document.getElementById('j'+i).value = Math.round(angle);
+        document.getElementById('o'+i).textContent = angle.toFixed(1) + '°';
+      }
+      document.getElementById('j6').value = Math.round(state.gripper_mm);
+      document.getElementById('o6').textContent = state.gripper_mm.toFixed(1) + 'mm';
+    }
+
+    async function loadInitialConfig() {
+      const response = await fetch('/config');
+      const config = await response.json();
+      updateJointControls(config.arm);
+      ['px', 'py', 'pz'].forEach((id, i) => {
+        document.getElementById(id).value = config.ik.pos[i];
+      });
+      document.getElementById('pg').value = config.ik.gripper_mm;
+      document.getElementById('pdown').checked = config.ik.down;
+    }
+
+    async function trackArmState() {
+      try {
+        while (true) {
+          const response = await fetch('/state');
+          const data = await response.json();
+          if (!data.ok) return;
+          updateJointControls(data.state);
+          if (!data.state.motion_busy) break;
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
+      } catch (e) {}
+    }
+
+    function startIK() {
+      const pos = ['px','py','pz'].map(id => document.getElementById(id).value).join(',');
+      const g = document.getElementById('pg').value;
+      const down = document.getElementById('pdown').checked ? '1' : '0';
+      document.getElementById('ikstat').textContent = '解算中...';
+      fetch(`/move?pos=${pos}&down=${down}&gripper=${g}`)
+        .then(r => r.json())
+        .then(d => {
+          const stat = document.getElementById('ikstat');
+          if (d.ok) {
+            stat.textContent = `成功：误差 ${((d.ik.pos_err_m ?? d.ik.pos_err ?? 0)*1000).toFixed(1)}mm，${d.ik.iters} 次迭代` +
+              (d.ik.duration_s ? `，轨迹约 ${d.ik.duration_s.toFixed(1)}s` : '');
+            trackArmState();
+          } else {
+            stat.textContent = '失败：' + (d.reason || '目标不可达');
+          }
+        })
+        .catch(e => { document.getElementById('ikstat').textContent = '请求出错'; });
+    }
+
+    function goHome() {
+      document.getElementById('ikstat').textContent = '';
+      resetJoints();
+    }
+
+    loadInitialConfig().catch(() => {
+      document.getElementById('ikstat').textContent = '初始配置读取失败';
+    });
+  </script>
+</body>
+</html>

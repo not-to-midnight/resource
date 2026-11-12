@@ -3,6 +3,8 @@ from typing import List, Optional, Sequence
 
 import numpy as np
 
+from simulate.arm_simulate.config import CUBE_INITIAL_POS
+
 
 @dataclass
 class CubeData:
@@ -37,6 +39,9 @@ class CubeActor:
 
     def set_pose(self, position: list[float]):
         self.data.pos = position
+
+    def reset_position(self):
+        self.set_pose(list(CUBE_INITIAL_POS))
 
     def set_rotation(self, rotation: List[float]):
         self.data.rot = rotation

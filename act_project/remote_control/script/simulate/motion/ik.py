@@ -14,6 +14,7 @@
 返回：
     (q_final, success, iters)
 """
+
 import numpy as np
 
 
@@ -27,6 +28,8 @@ def dls_ik(
     max_iter: int = 400,
     pos_tol: float = 2e-3,
     rot_tol: float = 4e-2,
+    q_min=None,
+    q_max=None,
 ):
     """通用 6D DLS IK。
 
@@ -47,10 +50,14 @@ def dls_ik(
         if np.linalg.norm(err_p) < pos_tol and np.linalg.norm(err_r) < rot_tol:
             return q, True, it
 
-        J = jacobian(q)               # (6, nq)
+        J = jacobian(q)  # (6, nq)
         e = np.concatenate([err_p, err_r])  # (6,)
-        dq = J.T @ np.linalg.solve(J @ J.T + lam ** 2 * np.eye(6), e)
+        dq = J.T @ np.linalg.solve(J @ J.T + lam**2 * np.eye(6), e)
         q = q + dq
+        if q_min is not None:
+            q = np.maximum(q, q_min)
+        if q_max is not None:
+            q = np.minimum(q, q_max)
 
     return q, False, max_iter
 

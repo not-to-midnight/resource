@@ -18,13 +18,16 @@ _SCRIPT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "script")
 if _SCRIPT_DIR not in sys.path:
     sys.path.insert(0, _SCRIPT_DIR)
 
+from function.LogicSystem import LogicSys
 from simulate.arm_simulate.arm_manager import ArmSimulateManager
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="myCobot MuJoCo 实时画面")
     parser.add_argument("--port", type=int, default=8080, help="HTTP 端口")
-    manager = ArmSimulateManager()
+    # 独立入口也注册进 LogicSys，/move 等服务定位才能拿到同一个实例
+    LogicSys.register(ArmSimulateManager)
+    manager = LogicSys.get(ArmSimulateManager)
     manager.start(parser.parse_args().port)
     try:
         signal.pause()  # 主线程挂起，等工作线程推流

@@ -4,10 +4,13 @@
 机械臂的全部状态都在 ArmActor 里，本类只做编排。
 """
 
+import math
 import os
 import sys
 import threading
 import time
+
+import numpy as np
 
 # 把 script/ 加进 sys.path，这样 simulate/ 和 function/ 都可见
 _PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -42,7 +45,10 @@ class ArmSimulateManager(BaseService):
         self._httpd = None  # HTTP 服务对象
         self._httpd_thread = None  # HTTP 服务线程
         self._running = False  # 是否正在运行
+        self.stop_event = threading.Event()  # 渲染与轨迹线程退出信号
         self._port = 8080  # HTTP 服务端口
+        self._traj_thread = None  # 轨迹插值线程
+        self._traj_cancel = None  # 轨迹取消信号
 
     # ---------- 实体 ----------
     @property
@@ -68,17 +74,30 @@ class ArmSimulateManager(BaseService):
         self._port = port or self._port
         actor = self.actor
 
-        actor.stop_event.clear()
+        # 只接入已有 CubeActor，不改变 CubeManager / CubeActor 的业务逻辑
+        from function.LogicSystem import LogicSys
+        from simulate.cube_simulate.cube_simulate_manager import CubeSimulateManager
+
+        cube_actor = None
+        if LogicSys.has(CubeSimulateManager):
+            cube_actor = LogicSys.get(CubeSimulateManager).list_cubes().get(0)
+
+        self.stop_event.clear()
+        actor.ensure_sim()  # 同步建模型：失败会直接抛给 LogicSys，不会静默黑屏
         self._render_thread = threading.Thread(
-            target=render.render_loop, args=(actor,), name="arm-render", daemon=True
+            target=render.render_loop,
+            args=(actor, self.stop_event, cube_actor),
+            name="arm-render",
+            daemon=True,
         )
         self._render_thread.start()
-        time.sleep(1.0)  # 等 MuJoCo 模型加载出第一帧
+        time.sleep(1.0)  # 等渲染线程建好 renderer 并出新帧
 
         from http.server import ThreadingHTTPServer
 
         # 把实体注入 HTTP 层：每个请求处理器都通过同一个 actor 读写
         server.StreamHandler.actor = actor
+        # IK 走 LogicSys.get(ArmSimulateManager) 获取，不做方法注入
         self._httpd = ThreadingHTTPServer(("0.0.0.0", self._port), server.StreamHandler)
         # serve_forever 是阻塞调用，必须放独立线程；主流程只负责启动和登记
         self._httpd_thread = threading.Thread(
@@ -96,7 +115,12 @@ class ArmSimulateManager(BaseService):
             return
         self._running = False
         actor = self.actor
-        actor.stop_event.set()  # 让渲染线程退出循环
+        if self._traj_cancel is not None:
+            self._traj_cancel.set()  # 中断进行中的轨迹，释放运动控制权
+        if self._traj_thread is not None:
+            self._traj_thread.join(timeout=1.0)
+            self._traj_thread = None
+        self.stop_event.set()  # 让渲染与轨迹线程退出
         if self._render_thread is not None:
             self._render_thread.join(timeout=2.0)
             self._render_thread = None
@@ -118,18 +142,146 @@ class ArmSimulateManager(BaseService):
         self.actor.set_gripper_mm(mm)
 
     def get_state(self) -> dict:
-        return self.actor.get_state()
+        state = self.actor.get_state()
+        state["motion_busy"] = self.actor.motion_busy
+        return state
 
-    def capture_camera(self, name: str = "main") -> bytes:
-        return self.actor.get_frame(name)
+    def reset(self) -> None:
+        self.set_angles(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+        self.set_gripper(0.0)
 
-    def move_to_pose(self, pos, rot, gripper_mm: float = None) -> dict:
-        """给定末端目标位姿 (pos[3], rot[3,3])，解 IK 并下发。
+        from function.LogicSystem import LogicSys
+        from simulate.cube_simulate.cube_simulate_manager import CubeSimulateManager
 
-        这是高层入口——真机控制和仿真渲染都可以复用同一运动算法。
+        if LogicSys.has(CubeSimulateManager):
+            LogicSys.get(CubeSimulateManager).reset()
+
+    def move_to_pose(self, pos, rot=None, gripper_mm: float = None, max_iter: int = 200) -> dict:
+        actor = self.actor
+        if not actor.begin_motion():
+            return {
+                "ok": False,
+                "busy": True,
+                "reason": "已有运动在执行，禁止并发 IK / 手动控制",
+            }
+        try:
+            result = self._solve_to_pose(actor, pos, rot, gripper_mm, max_iter)
+        except Exception:
+            actor.end_motion()
+            raise
+        if not result.get("ok"):
+            actor.end_motion()
+            return result
+        # 解算成功：不直接跳到终点角，交给轨迹线程平滑插值过去，
+        # 运动控制权由轨迹线程在结束时释放（期间手动/并发 IK 仍被禁止）
+        q_start = result.pop("_q_start")
+        q_goal = result.pop("_q_goal")
+        result["duration_s"] = self._start_trajectory(actor, q_start, q_goal)
+        return result
+
+    def _start_trajectory(self, actor, q_start, q_goal) -> float:
+        """从当前关节角平滑插值到 IK 目标角，返回预计用时（秒）。
+
+        smoothstep 速度曲线（两端速度为 0），单关节限速 60°/s，30Hz 下发。
         """
-        # TODO: 等 render_loop 把 model/data 暴露出来后补上
-        # q0 从 data.qpos 读，forward/jacobian 用 mujoco API 封装
-        # q_solved, ok, _ = _motion_ik(forward, jacobian, q0, pos, rot)
-        # if ok: self.set_angles(*[math.degrees(q) for q in q_solved[:6]])
-        raise NotImplementedError("IK 入口待接入——需要 render_loop 暴露 model/data")
+        delta = np.abs(q_goal - q_start)
+        duration = min(6.0, max(0.8, float(delta.max()) / math.radians(60)))
+        self._traj_cancel = threading.Event()
+        cancel = self._traj_cancel
+
+        def run():
+            try:
+                steps = max(1, int(duration * 30))
+                for i in range(1, steps + 1):
+                    if cancel.is_set() or self.stop_event.is_set():
+                        return
+                    t = i / steps
+                    s = t * t * (3 - 2 * t)  # smoothstep，起止无冲击
+                    q = q_start + (q_goal - q_start) * s
+                    actor.set_angles(*[math.degrees(v) for v in q], _from_ik=True)
+                    time.sleep(duration / steps)
+            finally:
+                actor.end_motion()
+
+        self._traj_thread = threading.Thread(target=run, name="arm-traj", daemon=True)
+        self._traj_thread.start()
+        return duration
+
+    def _solve_to_pose(self, actor, pos, rot, gripper_mm, max_iter) -> dict:
+        _, _, actor_module, dls_ik = _lazy_modules()
+        import mujoco  # MUJOCO_GL 已在包初始化时设好，这里再导入才安全
+
+        model, _ = actor.ensure_sim()  # 未启动仿真也能单独解算
+        ik_data = mujoco.MjData(model)  # 本次 IK 的独立数据，不干扰渲染线程
+        qpos_adr = actor.arm_qpos_adr  # 臂关节在 qpos / qvel 中的实际索引
+        dof_adr = actor.arm_dof_adr
+        site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "tcp")
+        if site_id < 0:
+            raise RuntimeError("模型里找不到 tcp site")
+
+        def fk(q):
+            """正解：关节角(弧度) → 末端位置[3] 与姿态[3,3]。"""
+            ik_data.qpos[qpos_adr] = q
+            mujoco.mj_forward(model, ik_data)
+            return (
+                ik_data.site_xpos[site_id].copy(),
+                ik_data.site_xmat[site_id].reshape(3, 3).copy(),
+            )
+
+        def jac(q):
+            """雅可比：(6, 6)，前 3 行位置、后 3 行姿态。"""
+            ik_data.qpos[qpos_adr] = q
+            mujoco.mj_forward(model, ik_data)
+            jacp = np.zeros((3, model.nv))
+            jacr = np.zeros((3, model.nv))
+            mujoco.mj_jacSite(model, ik_data, jacp, jacr, site_id)
+            return np.vstack([jacp, jacr])[:, dof_adr]
+
+        target_pos = np.asarray(pos, dtype=float).reshape(-1)
+        if target_pos.shape != (3,):
+            raise ValueError(f"pos 需要 3 个分量，收到 {target_pos.size} 个")
+
+        q0 = np.array(actor.get_arm_qpos(), dtype=float)
+        target_rot = fk(q0)[1] if rot is None else np.asarray(rot, dtype=float).reshape(3, 3)
+
+        # 多起点求解：从零位出发时机械臂完全伸直（奇异位形），单一起点容易解到
+        # 肘部翻转 180° 的反向姿态，所以额外试两个自然弯曲的初值，取最优解。
+        seeds = [
+            q0,
+            np.array([0.0, -0.5, 1.0, 0.0, 0.5, 0.0]),
+            np.array([0.0, 0.5, -1.0, 0.0, 0.5, 0.0]),
+        ]
+        best = None
+        for seed in seeds:
+            q_try, ok_try, it_try = dls_ik(
+                fk,
+                jac,
+                seed,
+                target_pos,
+                target_rot,
+                max_iter=max_iter,
+                q_min=-actor_module.JOINT_LIMIT_RAD,
+                q_max=actor_module.JOINT_LIMIT_RAD,
+            )
+            err = float(np.linalg.norm(target_pos - fk(q_try)[0]))
+            # 先比是否收敛，再比位置误差，最后偏好关节角小的自然姿态
+            score = (0 if ok_try else 1, round(err, 6), float(np.linalg.norm(q_try)))
+            if best is None or score < best[0]:
+                best = (score, q_try, ok_try, it_try)
+
+        _, q, ok, iters = best
+
+        if ok and gripper_mm is not None:
+            self.set_gripper(gripper_mm)  # 夹爪不参与轨迹，直接到位
+
+        result = {
+            "ok": ok,
+            "iters": iters,
+            "q_deg": [round(math.degrees(v), 1) for v in q[:6]],
+            "pos_err_m": float(np.linalg.norm(target_pos - fk(q)[0])),
+        }
+        if ok:
+            # 轨迹端点（内部键，move_to_pose 里弹出，不进 HTTP 响应）
+            result["_q_start"] = q0.copy()
+            result["_q_goal"] = q[:6].copy()
+        return result

@@ -59,7 +59,7 @@ class LogicSystem:
     def register(self, cls: Type[BaseService]) -> "LogicSystem":
         with self._lock:
             if cls in self._services and self._inited.get(cls):
-                raise RuntimeError(f"{cls.__name__} 已在运行，先 unload 再 register")
+                raise RuntimeError(f"{cls.__name__} 已在运行")
             instance = cls()
             self._services[cls] = instance
             return self  # 链式调用
@@ -67,7 +67,7 @@ class LogicSystem:
     def get(self, cls: Type[BaseService]) -> BaseService:
         with self._lock:
             if cls not in self._services:
-                raise KeyError(f"{cls.__name__} 未注册；是否漏了 default_services 里的声明？")
+                raise KeyError(f"{cls.__name__} 未注册")
             return self._services[cls]
 
     def has(self, cls: Type[BaseService]) -> bool:
@@ -93,9 +93,6 @@ class LogicSystem:
         with self._lock:
             return {c.__name__: self._inited.get(c, False) for c in self._services}
 
-    # ---------- load 钩子（预留，服务器返回数据时再调用） ----------
-    def load_post(self, *args, **kwargs) -> None:
-        """加载游戏帖子/关卡等数据（预留接口）。"""
 
     # ---------- 内部 ----------
     def _clear_all(self) -> None:
@@ -115,8 +112,8 @@ def default_services() -> List[Type[BaseService]]:
     from simulate.cube_simulate.cube_simulate_manager import CubeSimulateManager
 
     services: List[Type[BaseService]] = [
-        ArmSimulateManager,
         CubeSimulateManager,
+        ArmSimulateManager,
     ]
     return services
 

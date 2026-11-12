@@ -41,6 +41,10 @@ class CubeSimulateManager(BaseService):
     def list_cubes(self) -> dict[int, CubeActor]:
         return self._cubes
 
+    def reset(self):
+        for cube in self._cubes.values():
+            cube.reset_position()
+
     def create_actor(self, config: CubeData) -> None:
         config.id = self._idCount
         self._cubes[self._idCount] = CubeActor(config)

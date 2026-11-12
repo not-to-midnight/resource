@@ -4,13 +4,13 @@ import json
 import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler
+from pathlib import Path
 
+from . import config
 from .arm_actor import ArmActor
-from .config import FPS
 
 
 class StreamHandler(BaseHTTPRequestHandler):
-    # 由 ArmSimulateManager 启动时注入，所有请求共用同一个机械臂实体
     actor: ArmActor = None
 
     def do_GET(self) -> None:
@@ -21,8 +21,16 @@ class StreamHandler(BaseHTTPRequestHandler):
             self._stream("chase")
         elif path.endswith("/stream"):
             self._stream("main")
+        elif path.endswith("/config"):
+            self._get_config()
+        elif path.endswith("/state"):
+            self._get_arm_state()
+        elif path.endswith("/reset"):
+            self._reset()
         elif path.endswith("/set"):
             self._set_joints()
+        elif path.endswith("/move"):
+            self._move_to_pose()
         elif path.endswith("/favicon.ico"):
             self.send_response(204)
             self.end_headers()
@@ -30,90 +38,7 @@ class StreamHandler(BaseHTTPRequestHandler):
             self._index()
 
     def _index(self) -> None:
-        html = """<!DOCTYPE html>
-<html><head><title>myCobot MuJoCo 仿真</title>
-<style>
-body{background:#111;color:#eee;font-family:sans-serif;margin:0;padding:16px}
-.wrap{display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap}
-img{border:1px solid #444;max-width:100%}
-.panel{background:#1b1b1b;border:1px solid #333;border-radius:8px;padding:16px;min-width:240px}
-.panel h3{margin:0 0 12px;font-size:15px;color:#9cdcfe}
-.row{display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid #2a2a2a;font-size:14px}
-.row span:last-child{font-family:monospace;color:#b5cea8}
-.muted{color:#888;font-size:12px;margin-top:8px;line-height:1.6}
-.slider{display:flex;align-items:center;gap:8px;margin:6px 0;font-size:13px}
-.slider label{width:26px;color:#9cdcfe}
-.slider input[type=range]{flex:1;accent-color:#4ea1ff}
-.slider output{width:52px;text-align:right;font-family:monospace;color:#b5cea8}
-.slider .step{width:24px;height:24px;padding:0;margin:0;font-size:15px;line-height:1;border-radius:4px}
-button{background:#2d2d2d;color:#eee;border:1px solid #444;border-radius:5px;padding:6px 12px;cursor:pointer;font-size:13px;margin-top:8px}
-button:hover{background:#3a3a3a}
-</style></head>
-<body>
-<div class="wrap">
-  <div><h3 style="margin-top:0">固定视角</h3><img src="/stream"></div>
-  <div><h3 style="margin-top:0">第一人称（腕部相机）</h3><img src="/stream_cam"></div>
-  <div><h3 style="margin-top:0">第三人称（跟随夹爪）</h3><img src="/stream_chase"></div>
-  <div class="panel">
-    <h3>关节控制</h3>
-    <div id="sliders"></div>
-    <button onclick="resetJoints()">全部回零</button>
-  </div>
-</div>
-<script>
-const box = document.getElementById('sliders');
-for (let i = 0; i < 6; i++) {
-  const row = document.createElement('div');
-  row.className = 'slider';
-  row.innerHTML = `<label>J${i+1}</label>
-    <button class="step" onclick="nudge(${i},-1)">−</button>
-    <input type="range" min="-160" max="160" step="1" value="0" id="j${i}">
-    <button class="step" onclick="nudge(${i},1)">+</button>
-    <output id="o${i}">0°</output>`;
-  box.appendChild(row);
-  row.querySelector('input').addEventListener('input', sendJoints);
-}
-{
-  const row = document.createElement('div');
-  row.className = 'slider';
-  row.innerHTML = `<label>G</label>
-    <button class="step" onclick="nudge(6,-1)">−</button>
-    <input type="range" min="0" max="15" step="1" value="0" id="j6">
-    <button class="step" onclick="nudge(6,1)">+</button>
-    <output id="o6">0mm</output>`;
-  box.appendChild(row);
-  row.querySelector('input').addEventListener('input', sendJoints);
-}
-
-function currentJoints() {
-  const vals = [];
-  for (let i = 0; i < 6; i++) {
-    const v = document.getElementById('j'+i).value;
-    document.getElementById('o'+i).textContent = v + '°';
-    vals.push(v);
-  }
-  const g = document.getElementById('j6').value;
-  document.getElementById('o6').textContent = g + 'mm';
-  vals.push(g);
-  return vals;
-}
-
-function sendJoints() {
-  fetch('/set?angles=' + currentJoints().join(',')).catch(() => {});
-}
-
-function nudge(id, d) {
-  const el = document.getElementById('j' + id);
-  el.value = Math.min(Number(el.max), Math.max(Number(el.min), Number(el.value) + d));
-  sendJoints();
-}
-
-function resetJoints() {
-  for (let i = 0; i < 7; i++) document.getElementById('j'+i).value = 0;
-  sendJoints();
-}
-</script>
-</body></html>""".encode("utf-8")
+        html = Path(__file__).with_name("index.html").read_bytes()
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(html)))
@@ -134,15 +59,65 @@ function resetJoints() {
                 self.wfile.write(b"Content-Type: image/jpeg\r\n")
                 self.wfile.write(b"Content-Length: " + str(len(jpg)).encode() + b"\r\n\r\n")
                 self.wfile.write(jpg + b"\r\n")
-                time.sleep(1.0 / FPS)
+                time.sleep(1.0 / config.FPS)
         except (BrokenPipeError, ConnectionResetError):
             pass
+
+    def _get_config(self) -> None:
+        body = json.dumps({
+            "arm": {
+                "angles_deg": config.ARM_INITIAL_ANGLES_DEG,
+                "gripper_mm": config.ARM_INITIAL_GRIPPER_MM,
+            },
+            "ik": {
+                "pos": config.IK_INITIAL_POS,
+                "gripper_mm": config.IK_INITIAL_GRIPPER_MM,
+                "down": config.IK_INITIAL_DOWN,
+            },
+        }).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _get_arm_state(self) -> None:
+        from function.LogicSystem import LogicSys
+        from .arm_manager import ArmSimulateManager
+
+        manager = LogicSys.get(ArmSimulateManager)
+        body = json.dumps({"ok": True, "state": manager.get_state()}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _reset(self) -> None:
+        from function.LogicSystem import LogicSys
+        from .arm_manager import ArmSimulateManager
+
+        status = 200
+        try:
+            manager = LogicSys.get(ArmSimulateManager)
+            manager.reset()
+            body = {"ok": True, "state": manager.get_state()}
+        except RuntimeError as e:
+            status = 400
+            body = {"ok": False, "reason": str(e)}
+        encoded = json.dumps(body).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(encoded)))
+        self.end_headers()
+        self.wfile.write(encoded)
 
     def _set_joints(self) -> None:
         """接收 ?angles=度,度,...（6 个关节，可选第 7 个为夹爪开度 mm）。"""
         query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
         raw = query.get("angles", [""])[0]
         ok = False
+        reason = ""
         try:
             vals = [float(v) for v in raw.split(",")]
             if len(vals) in (6, 7):
@@ -151,12 +126,15 @@ function resetJoints() {
                     self.actor.set_gripper_mm(vals[6])
                 ok = True
         except ValueError:
-            pass
+            reason = "参数格式错误"
+        except RuntimeError as e:  # IK 解算中，手动控制被禁止
+            reason = str(e)
 
         current = self.actor.get_state()
         body = json.dumps(
             {
                 "ok": ok,
+                "reason": reason,
                 "angles": current["angles_deg"],
                 "gripper_mm": current["gripper_mm"],
             }
@@ -166,6 +144,54 @@ function resetJoints() {
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def _move_to_pose(self) -> None:
+        """/move?pos=x,y,z&down=1&gripper=10 或 &rot=9个数（行主序旋转矩阵）。
+
+        down=1 等价于工具轴竖直朝下 diag(1,-1,-1)；都不传则保持当前姿态。
+        """
+        import numpy as np
+
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        body = {"ok": False, "reason": ""}
+        try:
+            raw = query.get("pos", [""])[0]
+            pos = [float(v) for v in raw.split(",")]
+            if len(pos) != 3:
+                raise ValueError("pos 需要 x,y,z 三个数")
+
+            rot = None
+            if "rot" in query:
+                vals = [float(v) for v in query["rot"][0].split(",")]
+                if len(vals) != 9:
+                    raise ValueError("rot 需要 9 个数（行主序 3x3）")
+                rot = np.array(vals).reshape(3, 3)
+            elif query.get("down", ["0"])[0] == "1":
+                rot = np.diag([1.0, -1.0, -1.0])
+
+            grip = query.get("gripper", [""])[0]
+            gripper_mm = float(grip) if grip else None
+
+            # 通过 LogicSys 服务定位拿 manager（局部 import 避免循环依赖）
+            from function.LogicSystem import LogicSys
+            from .arm_manager import ArmSimulateManager
+
+            mgr = LogicSys.get(ArmSimulateManager)
+            if mgr is None:
+                body["reason"] = "ArmSimulateManager 未注册到 LogicSys"
+            else:
+                result = mgr.move_to_pose(pos, rot, gripper_mm)
+                body = {"ok": result.get("ok", False), "reason": result.get("reason", ""),
+                        "pos": pos, "ik": result}
+        except (ValueError, RuntimeError) as e:
+            body["reason"] = str(e)
+
+        data = json.dumps(body).encode()
+        self.send_response(200 if body["ok"] else 400)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
 
     def log_message(self, fmt: str, *args) -> None:
         pass  # 静默 HTTP 请求日志：拖滑块时 /set 洪水会拖慢调试控制台

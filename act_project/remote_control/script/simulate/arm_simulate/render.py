@@ -6,22 +6,17 @@ import cv2
 import mujoco
 
 from .arm_actor import ArmActor
-from .config import FPS, HEIGHT, MESH_DIR, URDF, WIDTH
-from .mjcf import build_mjcf
+from .config import FPS, HEIGHT, WIDTH
 
 
-def render_loop(actor: ArmActor) -> None:
+def render_loop(actor: ArmActor, stop_event, cube_actor=None) -> None:
     try:
-        mjcf = build_mjcf(URDF, MESH_DIR)
-        with open("/tmp/mycobot_mjcf.xml", "w") as f:
-            f.write(mjcf)  # 留一份便于排查
-        model = mujoco.MjModel.from_xml_string(mjcf)
-        data = mujoco.MjData(model)
+        model, data = actor.ensure_sim()  # 模型归 actor 所有，这里只取用
         renderer = mujoco.Renderer(model, HEIGHT, WIDTH)
         wrist_renderer = mujoco.Renderer(model, HEIGHT, WIDTH)
         chase_renderer = mujoco.Renderer(model, HEIGHT, WIDTH)
     except Exception as e:
-        # 模型加载失败不能静默——线程直接死会让三路推流全黑且无任何报错
+        # 初始化失败不能静默——线程直接死会让三路推流全黑且无任何报错
         import traceback
         print(f"[render] 模型初始化失败: {e}")
         traceback.print_exc()
@@ -35,12 +30,39 @@ def render_loop(actor: ArmActor) -> None:
 
     substeps = max(1, round((1.0 / FPS) / model.opt.timestep))
 
-    while not actor.stop_event.is_set():
+    # 接入 CubeManager 中已有的 CubeData：初始化时读取当前仿真状态，之后只同步控制修改
+    cube_qpos_adr = cube_dof_adr = cube_geom_id = None
+    last_cube_pos = last_cube_size = None
+    if cube_actor is not None:
+        body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "cube")
+        joint_id = model.body_jntadr[body_id]
+        cube_qpos_adr = int(model.jnt_qposadr[joint_id])
+        cube_dof_adr = int(model.jnt_dofadr[joint_id])
+        cube_geom_id = int(model.body_geomadr[body_id])
+        cube_actor.data.pos = [
+            float(v) for v in data.qpos[cube_qpos_adr:cube_qpos_adr + 3]
+        ]
+        cube_actor.data.size_mm = float(model.geom_size[cube_geom_id, 0] * 2000)
+        last_cube_pos = tuple(cube_actor.data.pos)
+        last_cube_size = cube_actor.data.size_mm
+
+    while not stop_event.is_set():
         state = actor.get_state()
         data.ctrl[:6] = state["angles_rad"]
         data.ctrl[6:] = state["gripper_m"]
-        for _ in range(substeps):
-            mujoco.mj_step(model, data)  # 仿真步进/物理模拟计算
+        with actor.sim_lock:
+            if cube_actor is not None:
+                pos = tuple(float(v) for v in cube_actor.data.pos)
+                size_mm = float(cube_actor.data.size_mm)
+                if pos != last_cube_pos:
+                    data.qpos[cube_qpos_adr:cube_qpos_adr + 3] = pos
+                    data.qvel[cube_dof_adr:cube_dof_adr + 6] = 0
+                    last_cube_pos = pos
+                if size_mm != last_cube_size:
+                    model.geom_size[cube_geom_id, :] = size_mm / 2000.0
+                    last_cube_size = size_mm
+            for _ in range(substeps):
+                mujoco.mj_step(model, data)  # 仿真步进/物理模拟计算
 
         renderer.update_scene(data, camera=cam)
         rgb = renderer.render()

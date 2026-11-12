@@ -4,7 +4,7 @@ import math
 import os
 import xml.etree.ElementTree as ET
 
-from .config import JOINT_LIMIT
+from .config import CUBE_INITIAL_POS, CUBE_INITIAL_SIZE_MM, JOINT_LIMIT
 
 
 def rpy_to_quat(roll: float, pitch: float, yaw: float):
@@ -67,6 +67,8 @@ def _emit_gripper(out: list, pad: str) -> None:
     out.append(
         f'{pad}  <geom type="box" size="0.015 0.023 0.009" rgba="0.30 0.33 0.38 1"/>'
     )
+    # 工具中心点：两指尖之间，IK 的末端目标就解到这里
+    out.append(f'{pad}  <site name="tcp" pos="0 0 0.039" size="0.002" rgba="0 0 0 0"/>')
     # 第一人称：挂在掌部侧后方（侧装+略微后移），前视+朝夹爪内倾，视场较宽，能看到手指
     out.append(
         f'{pad}  <camera name="wrist_cam" pos="0.045 0 -0.015" '
@@ -111,9 +113,9 @@ def build_mjcf(urdf_path: str, mesh_dir: str) -> str:
     out += ["  </asset>", "  <worldbody>",
             '    <light pos="0.25 -0.25 1.4" dir="-0.18 0.18 -1" directional="true" castshadow="false"/>',
             '    <geom name="floor" type="plane" size="6 6 0.02" rgba="0.55 0.58 0.62 1"/>',
-            '    <body name="cube" pos="0.18 -0.08 0.012">',
+            f'    <body name="cube" pos="{fmt(CUBE_INITIAL_POS)}">',
             '      <freejoint/>',
-            '      <geom type="box" size="0.012 0.012 0.012" rgba="0.85 0.35 0.25 1"/>',
+            f'      <geom type="box" size="{fmt([CUBE_INITIAL_SIZE_MM / 2000.0] * 3)}" rgba="0.85 0.35 0.25 1"/>',
             '    </body>']
 
     def emit(link_name: str, indent: int, parent_joint=None) -> None:
