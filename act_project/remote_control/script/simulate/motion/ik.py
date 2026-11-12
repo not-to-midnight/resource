@@ -61,13 +61,3 @@ def dls_ik(
 
     return q, False, max_iter
 
-
-def rotvec(R):
-    """旋转矩阵 → 旋转向量（长度 = 旋转角，方向 = 旋转轴）。"""
-    cos = max(-1.0, min(1.0, (np.trace(R) - 1.0) / 2.0))
-    ang = np.arccos(cos)
-    if ang < 1e-6:
-        return np.zeros(3)
-    skew = (R - R.T) / 2.0
-    axis = np.array([skew[2, 1], skew[0, 2], skew[1, 0]])
-    return axis * ang / (np.linalg.norm(axis) + 1e-12)
